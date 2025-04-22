@@ -1,9 +1,56 @@
+import pickle
+import joblib
+import numpy as np
 import streamlit as st
 import requests
 import json
 from datetime import datetime
 import pytz
 import pandas as pd
+import warnings
+warnings.filterwarnings("ignore")
+
+# ==== TẢI MODEL ====
+@st.cache_resource
+def load_models():
+    with open('Model/ML_heartattack.sav', 'rb') as f:
+        heart_model = pickle.load(f)
+    knn_depression = joblib.load('Model/CDTC_knn.sav')
+    with open('Model/NutriAI.sav', 'rb') as f:
+        obesity_model, scaler = pickle.load(f)
+    return heart_model, knn_depression, obesity_model, scaler
+
+heart_model, knn_depression, obesity_model, scaler = load_models()
+
+# ==== HÀM DỰ ĐOÁN + MESSAGE ====
+def predict_heart(features):
+    pred = heart_model.predict(np.array(features).reshape(1, -1))[0]
+    if pred == 0:
+        return "Chúc mừng bạn không có nguy cơ mắc bệnh tim mạch"
+    else:
+        return "Bạn có nguy cơ cao mắc bệnh tim mạch, hãy đi khám ngay!"
+
+def predict_depression(features):
+    pred = knn_depression.predict(np.array(features).reshape(1, -1))[0]
+    if pred == 0:
+        return "Chúc mừng bạn không có nguy cơ trầm cảm"
+    else:
+        return "Bạn có nguy cơ trầm cảm, hãy đi gặp chuyên gia tâm lý!"
+
+def predict_obesity(features):
+    scaled = scaler.transform(np.array(features).reshape(1, -1))
+    pred = obesity_model.predict(scaled)[0]
+    messages = {
+        0: " Thiếu cân",
+        1: " Cân nặng bình thường",
+        2: " Thừa cân cấp độ I",
+        3: " Thừa cân cấp độ II",
+        4: " Béo phì loại I",
+        5: " Béo phì loại II",
+        6: " Béo phì loại III"
+    }
+    return messages.get(pred, "Kết quả không xác định")
+
 
 # Firebase configuration
 FIREBASE_URL = "https://bai-test-2ae56-default-rtdb.asia-southeast1.firebasedatabase.app"
@@ -140,11 +187,65 @@ def main():
             inputs = edit_obesity_form(editing_data["inputs"])
 
         if st.button("Lưu thay đổi"):
+            # Tính lại kết quả chuẩn đoán theo loại chẩn đoán
+            if editing_data["type"] == "heart":
+                # Tạo features cho tim mạch (chú ý thứ tự theo mô hình ban đầu)
+                features = [
+                    inputs["age"],
+                    1 if "Nam" in inputs["gender"] else 0,
+                    int(inputs["chest_pain"].split("(")[1].rstrip(")")),
+                    inputs["blood_pressure"],
+                    inputs["cholesterol"],
+                    inputs["heartbeat"],
+                    int(inputs["thalassemia"].split("(")[1].rstrip(")"))
+                ]
+                new_result = predict_heart(features)
+            elif editing_data["type"] == "depression":
+                # Tạo features cho trầm cảm (đảm bảo thứ tự như khi dự đoán ban đầu)
+                features = [
+                    1 if "Nam" in inputs["gender"] else 0,
+                    inputs["age"],
+                    inputs["study_pressure"],
+                    inputs["cgpa"],
+                    inputs["satisfaction"],
+                    # Giả sử 'sleep' và 'diet' cần chuyển đổi nếu cần,
+                    int(inputs["sleep"].split("(")[1].rstrip(")")),
+                    int(inputs["diet"].split("(")[1].rstrip(")")),
+                    1 if inputs["suicide_thoughts"] == "Có (1)" else 0,
+                    inputs["study_hours"],
+                    inputs["financial_pressure"],
+                    1 if inputs["family_history"] == "Có (1)" else 0
+                ]
+                new_result = predict_depression(features)
+            elif editing_data["type"] == "obesity":
+                # Tạo features cho béo phì (chuyển đổi các giá trị theo định dạng ban đầu)
+                features = [
+                    1 if "Nam" in inputs["gender"] else 0,                              # feature 1: Giới tính
+                    inputs["age"],                                                       # feature 2: Tuổi
+                    inputs["height"],                                                    # feature 3: Chiều cao
+                    inputs["weight"],                                                    # feature 4: Cân nặng
+                    int(inputs["family_history"].split("(")[1].rstrip(")")),               # feature 5: Gia đình có thừa cân?
+                    int(inputs["caloric_food"].split("(")[1].rstrip(")")),                 # feature 6: Tiêu thụ thực phẩm giàu calo?
+                    int(inputs["veg_intake"].split("(")[1].rstrip(")")),                   # feature 7: Ăn rau
+                    int(inputs["meals_per_day"].split("(")[1].rstrip(")")),                # feature 8: Số bữa chính/ngày
+                    int(inputs["snacking"].split("(")[1].rstrip(")")),                     # feature 9: Ăn vặt
+                    int(inputs["smoking"].split("(")[1].rstrip(")")),                      # feature 10: Hút thuốc?
+                    inputs["water_liter"],                                                 # feature 11: Nước uống (lít)
+                    int(inputs["track_calories"].split("(")[1].rstrip(")")),               # feature 12: Theo dõi calo?
+                    int(inputs["activity"].split("(")[1].rstrip(")")),                     # feature 13: Hoạt động thể chất
+                    int(inputs["device_time"].split("(")[1].rstrip(")")),                  # feature 14: Giờ dùng thiết bị
+                    int(inputs["alcohol"].split("(")[1].rstrip(")")),                      # feature 15: Tiêu thụ rượu
+                    int(inputs["transport"].split("(")[1].rstrip(")"))                     # feature 16: Phương tiện chính
+                ]
+                new_result = predict_obesity(features)
+            else:
+                new_result = "Kết quả không xác định"
+
             updated_data = {
                 "user_name": user_name,
                 "type": editing_data["type"],
                 "inputs": inputs,
-                "result": result,
+                "result": new_result,
                 "timestamp": editing_data["timestamp"]
             }
             update_in_firebase(f"diagnoses/{editing_id}", updated_data)
@@ -228,7 +329,7 @@ def edit_obesity_form(inputs):
         "veg_intake": fcvc,
         "meals_per_day": ncp,
         "snacking": caec,
-        "smoking": smoke,
+        "smoking": smoke,          # thêm trường này
         "water_liter": water,
         "track_calories": scc,
         "activity": faf,
